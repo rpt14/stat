@@ -1,0 +1,273 @@
+---
+title: "stat_learning_final_project"
+author: "RyanThompson"
+date: "2025-05-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For this project I will be trying to predict the intensity of forest fires in Montesinho Natural Park in Portugal. Using support vector machines and other supervised learning methods I will classify fires into small or large based on weather conditions, such as temperature, relative humidity, wind and rain.
+
+Before getting into the supervised learning I will do some basic exploration of the data. This dataset has 517 observations of forest fires, with each row being one fire. Importantly, there is a column for area, which measures the total size of burned area in hectares. This will be converted to a binary value to track the severity or intensity of a given fire. This will be based on predictor variables such as temp, RH, wind, and rain as they are listed in the dataset.
+
+
+```{r exploration and prep}
+# load library and read in data
+library(tidyverse)
+fire_data <- read_csv("forestfires.csv")
+
+# create histogram of area burned
+fire_data |>
+  ggplot() +
+  geom_histogram(aes(x = area), fill = "lightblue", col = "black", bins = 40) +
+  labs(title = "Distribution of Burned Area") +
+  xlab("Area (Hectares)") +
+  ylab("Frequency") +
+  theme_bw()
+
+# log scale because of skewing
+fire_data |>
+  ggplot() +
+  geom_histogram(aes(x = log1p(area)), fill = "forestgreen", col = "black", bins = 40) +
+  labs(title = "Distribution of Burned Area") +
+  xlab("Area (Hectares)") +
+  ylab("Frequency") +
+  theme_bw() 
+
+# add the scale to dataset
+fire_data <- fire_data |>
+  mutate(log_area = log1p(area))
+
+# remove original area to reduce confusion
+new_fire_data <- fire_data |>
+  select_if(is.numeric) |>
+  select(-area)
+
+# make a correlation heatmap 
+
+# download packages
+library(reshape2)
+
+# make variables numeric
+num_fire <- new_fire_data[, sapply(new_fire_data, is.numeric)]
+
+# make correlation matrix
+cor_mat <- cor(num_fire, use = "complete.obs")
+
+# convert to long format, so variables are in rows
+cor_long <- melt(cor_mat)
+
+# rounding for simplicity
+cor_long <- cor_long |>
+  mutate(value = round(value, 2))
+
+# create the correlation heatmap
+
+ggplot(cor_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, limit = c(-1, 1), space = "Lab",
+                       name = "Correlation") +
+  geom_text(aes(label = value), color = "black", size = 3) +
+  coord_fixed() +
+  labs(title = "Correlation Heatmap of Fire Variables",
+       x = "",
+       y = "") +
+  theme_bw()
+
+# convert categorical variables
+fire_factor <- fire_data |>
+  mutate(across(c(month, day), ~ as.factor(tolower(.))))
+
+# create a binary column for severity (size) of fire
+## large fires are ones over 5 hectares burned
+fire_new <- fire_factor |>
+  mutate(large_fire = if_else(area > 5, 1, 0))
+
+# count large and small fires
+fire_new |>
+  count(large_fire) |>
+  mutate(prop = n / sum(n))
+
+# standardize the data.
+
+# install package
+library(caret)
+
+# select relevant columns
+fire_scaled <- fire_new |>
+  select(temp, RH, wind, rain, FFMC, DMC, DC, ISI)
+
+# scale numeric predictors
+preproc <- preProcess(fire_scaled, method = c("center", "scale"))
+fire_scaled <- predict(preproc, fire_scaled)
+
+# seperate these to keep them not scaled + mutate large fires as factor
+other_columns <- fire_new |>
+  select(month, day, area, large_fire) |>
+  mutate(large_fire = as.factor(large_fire))
+
+# recombine all columns
+fire_complete <- bind_cols(fire_scaled, other_columns)
+
+```
+
+The first thing I did when looking was to create a histogram to examine the distributions of the area variable. The values were heavily skewed to the right, so I then used a log transformation (log1p) to reduce the skew and make the visualization of fire frequencies easier to observe. I then decided to create a correlation heatmap for the numeric variables in the dataset. The correlation matrix and heatmap are useful because they show which predictor variables are associated with another and the area variable. For example, the variables ISI, FFMC, and DMC had a relatively sizeable positive correlation with one another. These variables are basically fire weather indices from the Canadian Forest Fire Weather Index System used to assess fire risk and behavior. This suggests that these variables may capture certain related aspects of fire intensity well. In order to better define what I am trying to accomplish I decided to create a binary column for fire. This is someone subjective, but I made it so that if a fire burned more than 5 hectares, then it would be a large fire and indicated by a 1. If a fire burned 5 or fewer hectares, then it would be a small fire, indicated by a 0. This simplifies the classification and reduces any sensitivities from outliers. Lastly, I standardized the variables that would be most useful in predicting the size of the fire (temp, RH, rain, wind, FFMC, DMC, DC, ISI) by scaling them, so that they are all equal when I make the SVM model. The variable, large_fire, was also made to be a factor so that classification can actually occur. Now I can begin making the supervised learning models, such as the SVM.
+
+```{r SVM modeling}
+#split into training and testing data
+train_fire_rows <- sample(1:nrow(fire_complete),
+                             size = nrow(fire_complete)/2)
+
+train_fire <- fire_complete[train_fire_rows, ]
+test_fire  <- fire_complete[-train_fire_rows, ]
+
+# install package for SVM
+library(e1071)
+
+# train SVM on training data (train_fire)
+svm_fire <- svm(large_fire ~ ., data = train_fire, kernel = "radial", probability = TRUE)
+
+# summary
+summary(svm_fire)
+
+# use model to make predictions
+svm_pred <- predict(svm_fire, newdata = test_fire)
+
+# confusion matrix to evaluate
+confusionMatrix(svm_pred, test_fire$large_fire)
+# always predicting 0
+
+# confirm this is due to imbalance in categories
+table(fire_complete$large_fire)
+prop.table(table(fire_complete$large_fire))
+
+
+# weighting large fires 3:1 
+svm_fire_weighted <- svm(large_fire ~ ., 
+                          data = train_fire, 
+                          kernel = "radial", 
+                          class.weights = c("0" = 1, "1" = 3),
+                          probability = TRUE)
+
+# repeat code from before but with weighted svm
+svm_pred_weighted <- predict(svm_fire_weighted, newdata = test_fire)
+
+confusionMatrix(svm_pred_weighted, test_fire$large_fire)
+#less accurate but more balanced
+
+
+
+# create control to prevent overfit/ see performance
+train_fire_control <- trainControl(method = "cv", number = 5)
+
+# tune using parameters to help with imbalance
+tune_grid <- expand.grid(C = c(0.1, 1, 10),
+                         sigma = c(0.01, 0.1, 1))
+
+# Train svm with tuning
+svm_tuned <- train(large_fire ~ ., 
+                   data = train_fire,
+                   method = "svmRadial",
+                   preProcess = c("center", "scale"),
+                   tuneGrid = tune_grid,
+                   trControl = train_fire_control)
+
+# create new predictions with same code as before
+svm_preds <- predict(svm_tuned, newdata = test_fire)
+
+# and confusion matrix again
+confusionMatrix(svm_preds, test_fire$large_fire)
+#slightly better but still not great.
+
+# try other models such as a random forest or boosting to support
+```
+
+Before creating the SVM, I split the data into a testing and training data set. The training set uses the existing data to train the model and then the testing set can be used to see how well the model has learned. I started by training a very basic SVM model with the e1071 package. SVM is useful for this dataset because of its relatively small size (roughly 500 data points) and because it works well with classification and non-linear boundaries. I told the model to predict fire size based on whether it is greater than or less than 5 hectares of burned area using all other variables. I used a radial kernal here, which is used to create a curved boundary. The model tries to find the best boundary to seperate large and small fires. Here, SVM tries to find the best boundary that separates the large and small fire groups with as much margin as possible. It tries to draw a line that keeps the groups seperated as far apart as it can. Using this, I then made the actual predictions for this dataset. I used a confusion matrix to evaluate how well the predictions were. The model predicted 183/183 small fires and 10/76 large fires. The confusion matrix compares the predicted values with the actual values. So 183 of the actual small fires were predicted correctly. For the large fires it is more interesting. It predicts 66 of the actual large fires as small and 10 as large. The 66 it predicted as small are false negatives. This is important because it is underestimating the risk of the large fires. In practice, if this data was used to try and prevent forest fires from burning so much land, then the policy based off this model will miss many of the fires that pose threats to become large fires and cause a lot of damage. So, although it has a roughly 75% accuracy, the model is not that good. Due to imbalances in the data, it just defaults to everything being a small fire as that has the highest accuracy. I confirmed that this was due to bias in the dataset with many more small fires being present. I then tried to improve the model by giving more weight, or importance, to large fires during training to balance the influence. I did a 3:1 model because there were roughly 3 times as many small fires as large. This made the predictions more balanced with roughly the same accuracy. Although the model now predicted 38/76 large fires correct, it only predicted 158/183 small fires correct. Because this data is useful for understand how fires start and behave, this is arguably a better model. I then went to make one more improvement based on the tuning parameters of the model. I tried the parameters C and sigma. The parameter C works as a flexibility control for the imbalance. In this case a high C encourages the model to try to predict every possible point correct. This makes more complicated boundaries for it to split on, but also raises variance, which makes the model more specific to this one dataset and less applicable overall. Sigma controls the kernal width, which means that measures similarities of points based on their distance to one another. Higher sigma values focus on points that are closer together. Similar to C, this makes a more flexible fit, but also makes it more variable and potentially overfit to this data. Therefore, it is important to pick values that are higher in this instance, but does not go too far. This brings the overall accuracy to nearly 80%, with 183/183 of the small fires being predicted correctly, but only 24/76 large fires. This is better than what I had before, but it can be important to test other methods to confirm the results I am getting.
+
+
+```{r supporting models + visualization}
+#install packages for boosting
+library(xgboost)
+
+# convert data to numeric
+fire_boost <- fire_new |>
+  select(temp, RH, wind, rain, FFMC, DMC, DC, ISI, large_fire) |>
+  mutate(large_fire = as.numeric(large_fire))
+
+
+# make testing and training for boost
+train_boost_rows <- sample(1:nrow(fire_boost),
+                             size = nrow(fire_boost)/2)
+
+train_boost <- fire_boost[train_boost_rows, ]
+test_boost  <- fire_boost[-train_boost_rows, ]
+
+
+# create label vectors
+train_label <- as.numeric(train_boost$large_fire)
+test_label  <- as.numeric(test_boost$large_fire)
+
+# make into matrix
+train_matrix <- data.matrix(select(train_boost, -large_fire))
+test_matrix <- data.matrix(select(test_boost, -large_fire))
+
+# training matrix
+train_boost_predict <- xgb.DMatrix(data = train_matrix, label = train_label)
+test_boost_predict <- xgb.DMatrix(data = test_matrix, label = test_label)
+
+# create model
+boost_fire_train <- xgb.train(data = train_boost_predict,
+                                    nrounds = 100,
+                                    params = list(
+                                      learning_rate = 0.1,
+                                      objective = "binary:logistic"
+                                      )
+                                    )
+
+# Make predictions on the testing
+large_fire_preds <- predict(boost_fire_train, test_matrix)
+
+#make predictions binary
+fire_preds_bin <- if_else(large_fire_preds > 0.5, 1, 0)
+
+# Add predictions to the testing data 
+fire_boost_pred <- test_boost |>
+  mutate(fire_preds_bin = fire_preds_bin)
+
+# visualize with confusion matrix
+confusionMatrix(fire_preds_factor, test_labels_factor)
+
+# Convert both predicted and actual labels to factors
+pred_factor <- factor(fire_preds_bin, levels = c(0, 1))
+actual_factor <- factor(test_boost$large_fire, levels = c(0, 1))
+
+# Create confusion matrix
+confusionMatrix(pred_factor, actual_factor)
+
+
+## use shapviz to visualize
+
+# download package
+library(shapviz)
+
+# shap value
+shap_fire <- shapviz(boost_fire_train,
+                     X_pred = train_matrix,
+                     X = train_matrix)
+
+# shap value waterfall for a single point
+sv_waterfall(shap_fire, row_id = 140)
+
+
+# see all of the waterfalls with beeswarm
+sv_importance(shap_fire, kind = "beeswarm")
+
+```
+
+In order to supplement the SVM, I decided to also use boosting. To begin I first selected the variables related to fire weather and the size of the fire. I make this data numeric, rather than a factor because that is what boosting requires. I randomly split my data into training and testing, just as I did with the SVM. I then create labels for the binary values of 0 = small fire and 1 = large fire so that I can evaluate the model. In order to make predictions with XGBoost, I convert the data into matrices and remove large_fire so that it does not use that for its predictions. I use xgb.DMatrix to attach my labels that I created earlier. Then I train the XGBoost model. The tuning parameters include nrounds, which is the amount of times a decision tree will be added to the model. Each tree builds on the previous one trying to correct errors through various splits based on the input data. They build on eachother here to improve on the splits and hopefully lead to better predictions. I chose 100 here. The learning rate controls how much each tree improves on the one before. Here I use a value of 0.1 to balance the 100 trees. This allows each tree to slowly improve through small steps in a better direction. This is also useful in reduces overfitting. Lastly, I made the objective binary:logistic because I am trying to predict 0 or 1 (small or large fire). I can then make the predictions. I bin these predictions into 0 or 1 because it is binary to make it cleaner. I then added the predictions to the original dataset, which is a good way to easily look through them. I then evaluated with a confusion matrix. The matrix did not do very well here. It predicted 155/187 small fires and only 14/72 large fires, for a total accuracy of 65%. This is much worse than the SVM. I try to visualize this model with shap values to see any trends in the variables. The shap values are useful in showing why the model made the predictions it did. I use a waterfall to test it on a single variable which is a good way to breakdown the variables influencing it and to make sure the model is working. I then move on to a beeswarm, which shows the variables that were most important across al predictions. In the beeswarm, the y-axis shows the different features, such as temp, wind, RH, etc., which are order by importance from top to bottom. The x-axis shows the shap value, or how much a given feature influences a predicted for a given point. Each point represents one fire occurrence. The more right a point is the more likely the model is to predict a large fire. The more left a point is the more likely the model will predict a small fire. Based on this none of the variables stand out as being extremely important. Additionally, considering the poor quality of my models, I can not confidently answers my initial research question about whether a fire will be small or large based on certain fire weather conditions. It is difficult to predict the intensity of a fire and how it might behave based on just these variables. Although they are an important part of the equation, they do not capture all aspects of the environment, especially considering human influence on an environment. There is a lot of vulnerability based on countless other factors, making this a very challenging area of research to predict. Even looking at the beeswarm, there is such a spread of shap values and feature values that I can not confidently claim that any certain variables contribute more or less to large fires. The models continued to create false negatives, making it hard to use this data to create any policy that can prevent large fires from causing severe damage.
+
+
